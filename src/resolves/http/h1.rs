@@ -1,6 +1,5 @@
 use anyhow::Context;
 use std::collections::HashMap;
-use std::fmt::{Display, Formatter};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
@@ -126,50 +125,17 @@ async fn next(stream: &mut TlsStream<TcpStream>, byte: &mut [u8; 1]) -> Option<c
 }
 
 pub struct Request<'input> {
-    method: RequestMethod,
     headers: HashMap<&'input str, &'input str>,
     path: &'input str,
     body: Option<&'input [u8]>,
-}
-#[derive(Debug)]
-pub enum RequestMethod {
-    Option,
-    Get,
-    Post,
-    Put,
-    Delete,
-    Head,
-    Trace,
-    Connect,
-    Patch,
-}
-impl Display for RequestMethod {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RequestMethod::Option => f.write_str("OPTION"),
-            RequestMethod::Get => f.write_str("GET"),
-            RequestMethod::Post => f.write_str("POST"),
-            RequestMethod::Put => f.write_str("PUT"),
-            RequestMethod::Delete => f.write_str("DELETE"),
-            RequestMethod::Head => f.write_str("HEAD"),
-            RequestMethod::Trace => f.write_str("TRACE"),
-            RequestMethod::Connect => f.write_str("CONNECT"),
-            RequestMethod::Patch => f.write_str("PATCH"),
-        }
-    }
 }
 impl<'input> Request<'input> {
     pub fn new() -> Self {
         Self {
             path: "",
-            method: RequestMethod::Get,
             headers: HashMap::from([("accept", "*/*")]),
             body: None,
         }
-    }
-    pub fn method(&mut self, method: RequestMethod) -> &mut Self {
-        self.method = method;
-        self
     }
     pub fn path(&mut self, path: &'input str) -> &mut Self {
         self.path = path;
@@ -188,7 +154,7 @@ impl<'input> Request<'input> {
         req.extend_from_slice(
             format!(
                 "{method} {path} {PROTOCOL}/{VERSION}\r\n",
-                method = self.method,
+                method = "POST",
                 path = self.path
             )
             .as_bytes(),
