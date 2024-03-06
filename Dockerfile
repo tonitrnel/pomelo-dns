@@ -15,10 +15,10 @@ RUN cargo build --release
 FROM alpine:latest
 
 WORKDIR /app
-
+RUN mkdir "/etc/pomelo"
+RUN mkdir "/var/log/pomelo"
 COPY --from=builder /app/target/release/pomelo .
-COPY pomelo.conf ./pomelo.conf
-COPY ./Country.mmdb ./Country.mmdb
+COPY ./pomelo.conf /etc/pomelo/pomelo.conf
 
 EXPOSE 53/tcp
 EXPOSE 53/udp

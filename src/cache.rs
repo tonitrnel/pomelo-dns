@@ -69,7 +69,7 @@ impl Cache {
     pub fn access(&self) -> anyhow::Result<Option<MutexGuard<Inner>>> {
         if let Some(inner) = &self.inner {
             Ok(Some(inner.lock().map_err(|err| {
-                anyhow::format_err!("Failed to lock cache, reason = {}", err)
+                anyhow::format_err!("Failed to lock cache, reason: {}", err)
             })?))
         } else {
             Ok(None)

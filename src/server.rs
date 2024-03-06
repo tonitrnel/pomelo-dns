@@ -4,7 +4,7 @@ use crate::handler::Handler;
 use crate::MAX_CONNECTIONS;
 use futures_util::FutureExt;
 use std::net::SocketAddr;
-use std::sync::{Arc};
+use std::sync::Arc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
@@ -13,6 +13,7 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
+use crate::logs::LogWriter;
 
 const MAX_UDP_PACKET_SIZE: usize = 4096;
 
@@ -47,7 +48,7 @@ impl UdpServer {
                 _ = shutdown_signal.cancelled() => break,
             };
             let bytes = req.to_vec();
-            let group = self.config.access().await.attribute_group(&addr.ip());
+            let group = self.config.access().attribute_group(&addr.ip());
             let mut handler =
                 Handler::new("udp", addr, group, self.cache.clone(), self.config.clone());
             let socket = self.socket.clone();
@@ -101,7 +102,7 @@ impl TcpServer {
                 _ = shutdown_signal.cancelled() => break,
             };
             let bytes = req.to_vec();
-            let group = self.config.access().await.attribute_group(&addr.ip());
+            let group = self.config.access().attribute_group(&addr.ip());
             let mut handler =
                 Handler::new("tcp", addr, group, self.cache.clone(), self.config.clone());
             join_set.spawn(async move {
@@ -136,13 +137,16 @@ impl TcpServer {
     }
 }
 
+pub struct ServerArgs{
+    pub config: Arc<Config>,
+    pub logs: LogWriter
+}
+
 pub async fn run_until_done(
-    config: Arc<Config>,
+    args: ServerArgs,
     binds: (TcpListener, UdpSocket),
 ) -> anyhow::Result<()> {
-    let cache = Arc::new(Cache::with_capacity(
-        config.access().await.metadata.cache_size,
-    ));
+    let cache = Arc::new(Cache::with_capacity(args.config.access().metadata.cache_size));
     let mut join_set = JoinSet::new();
     let shutdown_signal = CancellationToken::new();
     let limit_connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
@@ -153,7 +157,7 @@ pub async fn run_until_done(
             limit_connections: limit_connections.clone(),
             shutdown_signal: shutdown_signal.clone(),
             shared_buf: [0; MAX_UDP_PACKET_SIZE],
-            config: config.clone(),
+            config: args.config.clone(),
             cache: cache.clone(),
         };
         join_set.spawn(async move { udp_server.run().await });
@@ -164,17 +168,46 @@ pub async fn run_until_done(
             socket: Arc::new(binds.0),
             limit_connections: limit_connections.clone(),
             shutdown_signal: shutdown_signal.clone(),
-            config: config.clone(),
+            config: args.config.clone(),
             cache: cache.clone(),
         };
         join_set.spawn(async move { tcp_server.run().await });
     }
-    // register ctrl+c
+    // register ctrl+c signal
     {
         let shutdown_signal = shutdown_signal.clone();
         join_set.spawn(async move {
             let _ = signal::ctrl_c().await;
             shutdown_signal.cancel();
+            Ok(())
+        });
+    }
+    // register usr1 signal to reopen log file when received
+    // register sighup signal to reload config when received
+    #[cfg(target_os = "linux")]
+    {
+        join_set.spawn(async move{
+            let mut sighup = signal::unix::signal(signal::unix::SignalKind::hangup())?;
+            let mut usr1 = signal::unix::signal(signal::unix::SignalKind::user_defined1())?;
+            loop {
+                tokio::select! {
+                    _ = sighup.recv() => {
+                            match args.config.reload() {
+                                Ok(_) => tracing::info!("Config reloaded successfully."),
+                                Err(err) => tracing::error!("Failed to reload config: {err:?}")
+                            }
+                    }
+                    _ = usr1.recv() => {
+                        match args.logs.reopen(){
+                            Ok(_) => (),
+                            Err(err) => eprintln!("Failed to reopen log files: {err:?}")
+                        }
+                    }
+                    _ = shutdown_signal.cancelled() => {
+                        break
+                    }
+                }
+            }
             Ok(())
         });
     }

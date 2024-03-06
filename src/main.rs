@@ -5,6 +5,7 @@ mod logs;
 mod ping;
 mod resolves;
 mod server;
+mod pidfile;
 
 use crate::config::Config;
 use crate::logs::registry_logs;
@@ -13,6 +14,8 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::{TcpListener, UdpSocket};
+use crate::pidfile::Pidfile;
+use crate::server::ServerArgs;
 
 pub const MAX_CONNECTIONS: usize = 1024;
 
@@ -29,18 +32,22 @@ fn print_banner() {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let path = env::args().nth(2).unwrap_or("pomelo.conf".to_string());
+    let _pid = Pidfile::new()?;
+    let path = env::args()
+        .nth(1)
+        .unwrap_or("/etc/pomelo/pomelo.conf".to_string());
     let config =
         Arc::new(Config::new(PathBuf::from(path)).with_context(|| "Failed to load config file")?);
+    let (mut log_writer, log_handle) = logs::LogWriter::new()?;
     let (udp, tcp) = {
-        let guard = config.access().await;
-        registry_logs(&guard.log);
-        let udp = UdpSocket::bind(&guard.metadata.bind)
+        let config = config.access();
+        registry_logs(&mut log_writer, config.metadata.access_log)?;
+        let udp = UdpSocket::bind(&config.metadata.bind)
             .await
-            .with_context(|| format!("could not bind to udp: {}", &guard.metadata.bind))?;
-        let tcp = TcpListener::bind(&guard.metadata.bind)
+            .with_context(|| format!("could not bind to udp: {}", &config.metadata.bind))?;
+        let tcp = TcpListener::bind(&config.metadata.bind)
             .await
-            .with_context(|| format!("could not bind to tcp: {}", &guard.metadata.bind))?;
+            .with_context(|| format!("could not bind to tcp: {}", &config.metadata.bind))?;
         (udp, tcp)
     };
     print_banner();
@@ -56,14 +63,24 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| "could not lookup local address")?
     );
     tracing::info!("awaiting connections...");
-    match server::run_until_done(config, (tcp, udp)).await {
+    match server::run_until_done(ServerArgs{
+        config,
+        logs: log_writer
+    }, (tcp, udp)).await {
         Ok(()) => {
             tracing::info!("PomeloDNS stopping");
-            Ok(())
         }
         Err(err) => {
             tracing::error!("PomeloDNS has encountered an error: {}", err);
-            Err(err)
+            return Err(err);
         }
     }
+    match log_handle.await {
+        Ok(result) => result?,
+        Err(err) if err.is_panic() => {
+            panic!("{}", err)
+        }
+        _ => (),
+    };
+    Ok(())
 }

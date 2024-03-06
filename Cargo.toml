@@ -23,7 +23,6 @@ tracing-subscriber = { version = "0.3.18", features = ["default", "chrono"] }
 chrono = "0.4.33"
 futures-util = "0.3.30"
 nu-ansi-term = "0.50.0"
-notify = "6.1.1"
 maxminddb = "0.24.0"
 
 [profile.release]

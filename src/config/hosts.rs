@@ -1,14 +1,14 @@
 use crate::config::{parse_key_value_pair, read_hosts, Inner, DEFAULT_GROUP};
 use anyhow::Context;
 use hickory_proto::rr::Name;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
 
 pub type Hosts = Vec<(IpAddr, Name)>;
 pub type GroupHostMappings = HashMap<String, Hosts>;
 
-pub fn parse(sub: &str, row: usize, line: &str, inner: &mut Inner) -> anyhow::Result<()> {
+pub fn parse(sub: &str, row: usize, line: &str, inner: &mut Inner, watch_paths: &mut HashSet<PathBuf>) -> anyhow::Result<()> {
     if sub != DEFAULT_GROUP && !inner.groups.contains_key(sub) {
         anyhow::bail!("Can't find group '{}' definition in {row}:8", sub);
     }
@@ -27,6 +27,7 @@ pub fn parse(sub: &str, row: usize, line: &str, inner: &mut Inner) -> anyhow::Re
                 ))
             })
             .collect::<Result<Vec<_>, anyhow::Error>>()?;
+        watch_paths.insert(path);
         inner
             .hosts
             .entry(sub.to_string())

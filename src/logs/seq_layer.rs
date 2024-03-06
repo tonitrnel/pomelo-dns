@@ -1,25 +1,29 @@
-use nu_ansi_term::{Color, Style};
 use std::collections::HashMap;
-use std::fmt::{Debug, Display, Formatter, Write};
+use std::env;
+use std::fmt::{self, Debug, Display, Formatter, Write};
+use std::io;
+use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
-use std::{env, fmt};
-use tracing::{field::Field, span::Attributes, Event, Id, Level, Subscriber};
+
+use nu_ansi_term::{Color, Style};
+use tracing::{Event, field::Field, Id, Level, span::Attributes, Subscriber};
 use tracing_subscriber::{
     field::Visit,
     fmt::{
         format,
         time::{ChronoLocal, FormatTime},
     },
-    layer::{Context, SubscriberExt},
+    fmt::MakeWriter,
+    Layer,
+    layer::Context,
     registry::LookupSpan,
-    util::SubscriberInitExt,
-    {filter, Layer},
 };
-use crate::config;
 
-struct SequentialLogLayer {
+pub struct SequentialLogLayer<S, W = fn() -> io::Stdout> {
     ansi: bool,
     logs: Arc<Mutex<HashMap<Id, Vec<String>>>>,
+    make_writer: W,
+    _inner: PhantomData<fn(S)>,
 }
 
 struct StringVisitor {
@@ -43,16 +47,6 @@ impl Display for StringVisitor {
 impl Visit for StringVisitor {
     fn record_debug(&mut self, _field: &Field, value: &dyn Debug) {
         write!(self.content, "{:?}", value).unwrap();
-    }
-}
-
-impl SequentialLogLayer {
-    fn new() -> Self {
-        let ansi = env::var("NO_COLOR").map_or(true, |v| v.is_empty());
-        Self {
-            ansi,
-            logs: Arc::new(Mutex::new(HashMap::new())),
-        }
     }
 }
 
@@ -148,9 +142,42 @@ impl<S> Display for SequentialLogLayerFormatter<'_, S>
     }
 }
 
-impl<S> Layer<S> for SequentialLogLayer
+/// 用于保证 Span 内日志输出的顺序
+impl<S> SequentialLogLayer<S> {
+    fn new() -> Self {
+        let ansi = env::var("NO_COLOR").map_or(true, |v| v.is_empty());
+        Self {
+            ansi,
+            logs: Arc::new(Mutex::new(HashMap::new())),
+            make_writer: io::stdout,
+            _inner: PhantomData,
+        }
+    }
+    pub fn with_ansi(self, ansi: bool) -> Self {
+        Self { ansi, ..self }
+    }
+}
+impl<S, W> SequentialLogLayer<S, W>
+    where
+        W: for<'writer> MakeWriter<'writer> + 'static,
+{
+    pub fn with_writer<W2>(self, make_writer: W2) -> SequentialLogLayer<S, W2>
+        where
+            W2: for<'writer> MakeWriter<'writer> + 'static,
+    {
+        SequentialLogLayer {
+            ansi: self.ansi,
+            _inner: self._inner,
+            logs: self.logs,
+            make_writer,
+        }
+    }
+}
+
+impl<S, W> Layer<S> for SequentialLogLayer<S, W>
     where
         S: Subscriber + for<'a> LookupSpan<'a>,
+        W: for<'writer> MakeWriter<'writer> + 'static,
 {
     fn on_new_span(&self, _attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
         let mut logs = self.logs.lock().unwrap();
@@ -172,30 +199,15 @@ impl<S> Layer<S> for SequentialLogLayer
     fn on_close(&self, id: Id, _ctx: Context<'_, S>) {
         let mut logs = self.logs.lock().unwrap();
         if let Some(messages) = logs.remove(&id) {
-            for message in messages {
-                println!("{}", message)
+            let mut writer = self.make_writer.make_writer();
+            for mut message in messages {
+                if !message.ends_with('\n') { message.push('\n') }
+                io::Write::write_all(&mut writer, message.as_bytes()).unwrap()
             }
         }
     }
 }
 
-pub fn registry_logs(_log: &config::log::Log) {
-    let filter = filter::Targets::new().with_target("pomelo", Level::TRACE);
-
-    let generic_layer = tracing_subscriber::fmt::layer()
-        .with_level(true)
-        .with_target(false)
-        .with_timer(ChronoLocal::new("%F %X%.3f".to_string()))
-        .with_filter(filter::filter_fn(|metadata| {
-            metadata.target() != "pomelo::handler" && metadata.target() != "sequential"
-        }));
-
-    let sequential_layer = SequentialLogLayer::new().with_filter(filter::filter_fn(|metadata| {
-        metadata.target() == "pomelo::handler" || metadata.target() == "sequential"
-    }));
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(generic_layer)
-        .with(sequential_layer)
-        .init();
+pub fn layer<S>() -> SequentialLogLayer<S>{
+    SequentialLogLayer::new()
 }

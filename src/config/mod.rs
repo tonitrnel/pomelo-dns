@@ -1,19 +1,20 @@
 mod group;
 mod hosts;
-pub(crate) mod log;
 mod metadata;
 mod resolution;
 mod server;
 
 use anyhow::Context;
 use hickory_proto::rr::domain::Name;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
-use tokio::sync::{RwLock, RwLockReadGuard};
+use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::Arc;
+
 
 static DEFAULT_GROUP: &str = "default";
 
@@ -24,14 +25,12 @@ pub struct Inner {
     hosts: hosts::GroupHostMappings,
     pub metadata: metadata::Metadata,
     ipv6_resolution: resolution::GroupResolutionMappings,
-    pub log: log::Log,
-    pub dep_paths: Vec<PathBuf>,
 }
 
 impl Inner {
-    pub fn load(path: PathBuf) -> anyhow::Result<Self> {
+    pub fn load(path: &PathBuf) -> anyhow::Result<(Self, HashSet<PathBuf>)> {
         let path = if path.is_absolute() {
-            path
+            path.to_owned()
         } else {
             std::env::current_dir().unwrap().join(path)
         };
@@ -40,31 +39,21 @@ impl Inner {
             .open(&path)
             .with_context(|| format!("Config file \"{:?}\" not exists.", path))?;
         let mut text = String::new();
+        let mut watch_paths = HashSet::new();
         fs.read_to_string(&mut text)
             .with_context(|| format!("Unable to read config file \"{:?}\".", path))?;
-        Inner::parse(path, &text)
+        watch_paths.insert(path);
+        Ok((Inner::parse(&text, &mut watch_paths)?, watch_paths))
     }
-    fn parse(path: PathBuf, str: &str) -> anyhow::Result<Self> {
-        let lines = str.lines();
+    fn parse(str: &str, watch_paths: &mut HashSet<PathBuf>) -> anyhow::Result<Self> {
         let mut config = Inner {
             groups: HashMap::new(),
             servers: HashMap::new(),
             hosts: HashMap::new(),
-            metadata: metadata::Metadata {
-                addn_host: None,
-                cache_size: 0,
-                bind: String::new(),
-                mmdb: None,
-            },
-            log: log::Log {
-                level: tracing::Level::TRACE,
-                dir: None,
-                max_files: None,
-                rotation: log::RollingRotation::Never,
-            },
+            metadata: metadata::Metadata::default(),
             ipv6_resolution: HashMap::new(),
-            dep_paths: vec![path],
         };
+        let lines = str.lines();
         let mut section: Option<Section> = None;
         let mut row = 0;
         for line in lines {
@@ -85,9 +74,8 @@ impl Inner {
                     }
                     Section::Group => group::parse(row, line, &mut config.groups)?,
                     Section::Server => server::parse(row, line, &mut config)?,
-                    Section::Host(sub) => hosts::parse(sub, row, line, &mut config)?,
+                    Section::Host(sub) => hosts::parse(sub, row, line, &mut config, watch_paths)?,
                     Section::Metadata => metadata::parse(row, line, &mut config)?,
-                    Section::Log => log::parse(row, line, &mut config.log)?,
                     Section::IPv6Resolution => {
                         resolution::ipv6_resolution_parse(row, line, &mut config)?
                     }
@@ -195,7 +183,6 @@ enum Section<'input> {
     Server,
     Host(&'input str),
     Metadata,
-    Log,
     IPv6Resolution,
     Unknown(&'input str),
 }
@@ -208,7 +195,6 @@ fn parse_section(section: &str) -> Section {
         "hosts" => Section::Host(parts.get(1).copied().unwrap_or("default")),
         "metadata" => Section::Metadata,
         "ipv6_resolution" => Section::IPv6Resolution,
-        "log" => Section::Log,
         _ => Section::Unknown(parts[0]),
     }
 }
@@ -293,21 +279,57 @@ fn read_hosts(path: &PathBuf) -> anyhow::Result<Vec<(String, Name)>> {
     Ok(entries)
 }
 
-pub type ConfigGuard<'input> = RwLockReadGuard<'input, Inner>;
 
 pub struct Config {
-    inner: RwLock<Inner>,
+    ptr: AtomicPtr<Inner>,
+    path: PathBuf
 }
 
 impl Config {
     pub fn new(path: PathBuf) -> anyhow::Result<Self> {
-        let inner = Inner::load(path).with_context(|| "Failed to load config file")?;
+        // todo: watch directory
+        let (inner, _watch_paths) =
+            Inner::load(&path).with_context(|| "Failed to load config file")?;
+        let inner_ptr = Arc::into_raw(Arc::new(inner)) as *mut Inner;
+        let ptr = AtomicPtr::new(inner_ptr);
         Ok(Self {
-            inner: RwLock::new(inner),
+            ptr,
+            path
         })
     }
-    pub async fn access(&self) -> ConfigGuard {
-        self.inner.read().await
+    /// 重载配置
+    pub fn reload(&self) -> anyhow::Result<()> {
+        let (inner, _watch_paths) =
+            Inner::load(&self.path).with_context(|| "Failed to load config file")?;
+        let inner_ptr = Arc::into_raw(Arc::new(inner)) as *mut Inner;
+        let old_ptr = self.ptr.swap(inner_ptr, Ordering::SeqCst);
+        unsafe {
+            // 转为 Arc 再丢弃
+            let _ = Arc::from_raw(old_ptr);
+        };
+        Ok(())
+    }
+    pub fn access(&self) -> Arc<Inner> {
+        let ptr = self.ptr.load(Ordering::SeqCst);
+        unsafe {
+            // Temporarily create an Arc from the raw pointer
+            let temp_arc = Arc::from_raw(ptr);
+            // Clone the Arc to increase the reference count
+            let cloned_arc = Arc::clone(&temp_arc);
+            // Forget the temporary Arc to prevent decrementing the reference count on drop
+            std::mem::forget(temp_arc);
+            cloned_arc
+        }
+    }
+}
+
+impl Drop for Config {
+    fn drop(&mut self) {
+        tracing::trace!("drop {:?}", self.ptr);
+        unsafe {
+            // 转为 Arc 再丢弃
+            let _ = Arc::from_raw(self.ptr.load(Ordering::SeqCst));
+        }
     }
 }
 
@@ -319,7 +341,7 @@ mod tests {
     #[test]
     fn it_works() {
         let path = Path::new("pomelo.conf");
-        let config = Inner::load(path.to_path_buf());
+        let config = Inner::load(&path.to_path_buf()).unwrap();
         println!("{:#?}", config);
     }
 }

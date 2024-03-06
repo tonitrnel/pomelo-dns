@@ -1,5 +1,5 @@
 use crate::cache::Cache;
-use crate::config::{Config, ConfigGuard};
+use crate::config::Config;
 use crate::resolves::resolve;
 use anyhow::Context;
 use hickory_proto::op::{Message, MessageType, Query};
@@ -126,19 +126,18 @@ impl Handler {
     const PTR_IPV6_SUFFIX: &'static str = ".ip6.arpa.";
     async fn resolve_from_hosts(&self, req: &Message) -> anyhow::Result<Option<Message>> {
         let mut answers = Vec::<Record>::new();
-        let guard = self.config.access().await;
         for query in req.queries() {
             let name = query.name().to_utf8();
             match query.query_type() {
                 RecordType::PTR => {
-                    if let Err(err) =
-                        self.local_reverse_dns_query(&guard, &name, query, &mut answers)
-                    {
+                    if let Err(err) = self.local_reverse_dns_query(&name, query, &mut answers) {
                         tracing::warn!("{}", format_err(err, 41))
                     };
                 }
                 RecordType::A => {
-                    let addrs = guard
+                    let addrs = self
+                        .config
+                        .access()
                         .get_hosts(&self.group, &name)
                         .into_iter()
                         .filter_map(|it| match it {
@@ -160,7 +159,9 @@ impl Handler {
                     }))
                 }
                 RecordType::AAAA => {
-                    let addrs = guard
+                    let addrs = self
+                        .config
+                        .access()
                         .get_hosts(&self.group, &name)
                         .into_iter()
                         .filter_map(|it| match it {
@@ -197,7 +198,6 @@ impl Handler {
     }
     fn local_reverse_dns_query(
         &self,
-        guard: &ConfigGuard,
         name: &str,
         query: &Query,
         answers: &mut Vec<Record>,
@@ -232,7 +232,7 @@ impl Handler {
         } else {
             return Ok(());
         };
-        if let Some(hostname) = guard.get_hostname(&self.group, addr) {
+        if let Some(hostname) = self.config.access().get_hostname(&self.group, addr) {
             answers.push(
                 Record::new()
                     .set_name(query.name().to_owned())
@@ -246,7 +246,7 @@ impl Handler {
     fn lookup_dns_cache(&mut self, req: &Message) -> anyhow::Result<Option<Message>> {
         let mut guard = match self.cache.access()? {
             Some(guard) => guard,
-            None => return Ok(None)
+            None => return Ok(None),
         };
         let mut answers = Vec::new();
         for query in req.queries() {
@@ -273,8 +273,8 @@ impl Handler {
         }
     }
     async fn forward_dns_query(&mut self, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let guard = self.config.access().await;
-        let server = guard.get_server(&self.group);
+        let config = self.config.access();
+        let server = config.get_server(&self.group);
         let now = Instant::now();
         tokio::select! {
             res = resolve(&server[0], bytes) =>  {
@@ -288,14 +288,15 @@ impl Handler {
     async fn resolution(&self, message: &mut Message) -> anyhow::Result<()> {
         let answers = message.answers_mut();
         let mut tasks = Vec::new();
+        let config = self.config.access();
         for answer in answers.iter() {
             if let Some(RData::AAAA(rdata::AAAA(addr))) = answer.data() {
                 let domain = answer.name().clone();
                 let group = self.group.clone();
                 let addr = IpAddr::from(addr.to_owned());
-                let config = self.config.clone();
+                let config = config.clone();
                 tasks.push(tokio::spawn(async move {
-                    config.access().await.is_allow_ipv6(&group, &domain, addr).await
+                    config.is_allow_ipv6(&group, &domain, addr).await
                 }));
             } else {
                 tasks.push(tokio::spawn(async move { true }))

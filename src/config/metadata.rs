@@ -7,9 +7,21 @@ pub struct Metadata {
     pub addn_host: Option<PathBuf>,
     pub cache_size: usize,
     pub bind: String,
-    pub mmdb: Option<maxminddb::Reader<Vec<u8>>>
+    pub mmdb: Option<maxminddb::Reader<Vec<u8>>>,
+    pub access_log: bool,
 }
 
+impl Default for Metadata {
+    fn default() -> Self {
+        Self{
+            addn_host: None,
+            cache_size: 0,
+            bind: String::new(),
+            mmdb: None,
+            access_log: true,
+        }
+    }
+}
 pub fn parse(row: usize, line: &str, inner: &mut Inner) -> anyhow::Result<()> {
     let (key, value, _) = parse_key_value_pair(line)
         .map_err(|(err, col)| anyhow::format_err!("{} in line {}:{}", err, row, col))?;
@@ -48,8 +60,16 @@ pub fn parse(row: usize, line: &str, inner: &mut Inner) -> anyhow::Result<()> {
                 anyhow::bail!("GeoIP file does not exist");
             }
             let reader = maxminddb::Reader::open_readfile(&value)
-                .with_context(||format!("Failed to parse mmdb file on '{:?}'", value))?;
+                .with_context(|| format!("Failed to parse mmdb file on '{:?}'", value))?;
             inner.metadata.mmdb = Some(reader);
+        }
+        "access_log" => {
+            let value = match value.as_str() {
+                "on" | "true" | "1" => true,
+                "off" | "false" | "0" => false,
+                _ => true,
+            };
+            inner.metadata.access_log = value;
         }
         _ => anyhow::bail!("Unknown metadata item specified: '{}'", key),
     }

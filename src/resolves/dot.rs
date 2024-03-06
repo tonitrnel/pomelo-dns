@@ -101,7 +101,7 @@ impl DoT {
             .get_or_init(|| async { Arc::new(Mutex::new(HashMap::new())) })
             .await
             .lock()
-            .map_err(|err| anyhow::format_err!("lock poll failed, reason {:?}", err))
+            .map_err(|err| anyhow::format_err!("lock poll failed, reason: {:?}", err))
     }
     async fn take(&self) -> anyhow::Result<(bool, Stream)> {
         let stream = {
