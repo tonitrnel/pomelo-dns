@@ -1,15 +1,15 @@
 use std::fs::{File, OpenOptions};
 use std::path::Path;
+use tracing::subscriber::DefaultGuard;
 use tracing::Level;
 use tracing_subscriber::{
-    fmt::time::{ChronoLocal},
+    fmt::time::ChronoLocal,
     layer::SubscriberExt,
-    util::SubscriberInitExt,
     {filter, Layer},
 };
 
-mod seq_layer;
 mod log_writer;
+mod seq_layer;
 
 pub use log_writer::LogWriter;
 
@@ -22,7 +22,7 @@ fn log_file(path: &Path) -> anyhow::Result<File> {
         .open(path)
         .with_context(|| format!("Failed to open log file '{path:?}'"))
 }
-pub fn registry_logs(writer: &mut LogWriter, access_log: bool) -> anyhow::Result<()> {
+pub fn registry_logs(writer: &mut LogWriter, access_log: bool) -> anyhow::Result<DefaultGuard> {
     let mut layers = Vec::new();
     let targets = filter::Targets::new().with_target("pomelo", Level::TRACE);
     let generic_layer = tracing_subscriber::fmt::layer()
@@ -68,9 +68,7 @@ pub fn registry_logs(writer: &mut LogWriter, access_log: bool) -> anyhow::Result
             layers.push(access_layer.boxed())
         }
     }
-    tracing_subscriber::registry()
-        .with(targets)
-        .with(layers)
-        .init();
-    Ok(())
+    let subscriber = tracing_subscriber::registry().with(targets).with(layers);
+    let guard = tracing::subscriber::set_default(subscriber);
+    Ok(guard)
 }

@@ -1,6 +1,7 @@
 use crate::cache::Cache;
 use crate::config::Config;
 use crate::handler::Handler;
+use crate::logs::LogWriter;
 use crate::MAX_CONNECTIONS;
 use futures_util::FutureExt;
 use std::net::SocketAddr;
@@ -13,7 +14,6 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_util::sync::CancellationToken;
-use crate::logs::LogWriter;
 
 const MAX_UDP_PACKET_SIZE: usize = 4096;
 
@@ -137,16 +137,18 @@ impl TcpServer {
     }
 }
 
-pub struct ServerArgs{
+pub struct ServerArgs {
     pub config: Arc<Config>,
-    pub logs: LogWriter
+    pub logs: LogWriter,
 }
 
 pub async fn run_until_done(
     args: ServerArgs,
     binds: (TcpListener, UdpSocket),
 ) -> anyhow::Result<()> {
-    let cache = Arc::new(Cache::with_capacity(args.config.access().metadata.cache_size));
+    let cache = Arc::new(Cache::with_capacity(
+        args.config.access().metadata.cache_size,
+    ));
     let mut join_set = JoinSet::new();
     let shutdown_signal = CancellationToken::new();
     let limit_connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
@@ -186,9 +188,11 @@ pub async fn run_until_done(
     // register sighup signal to reload config when received
     #[cfg(target_os = "linux")]
     {
-        join_set.spawn(async move{
+        let shutdown_signal = shutdown_signal.clone();
+        join_set.spawn(async move {
             let mut sighup = signal::unix::signal(signal::unix::SignalKind::hangup())?;
             let mut usr1 = signal::unix::signal(signal::unix::SignalKind::user_defined1())?;
+            let mut sigterm = signal::unix::signal(signal::unix::SignalKind::terminate())?;
             loop {
                 tokio::select! {
                     _ = sighup.recv() => {
@@ -197,22 +201,25 @@ pub async fn run_until_done(
                                 Err(err) => tracing::error!("Failed to reload config: {err:?}")
                             }
                     }
+                    _ = sigterm.recv() => {
+                        shutdown_signal.cancel();
+                    }
                     _ = usr1.recv() => {
                         match args.logs.reopen(){
                             Ok(_) => (),
                             Err(err) => eprintln!("Failed to reopen log files: {err:?}")
                         }
                     }
-                    _ = shutdown_signal.cancelled() => {
-                        break
-                    }
                 }
             }
-            Ok(())
         });
     }
 
     while let Some(r) = join_set.join_next().await {
+        if shutdown_signal.is_cancelled() {
+            join_set.shutdown().await;
+            break;
+        }
         match r {
             Ok(Ok(_)) => (),
             Ok(Err(e)) => return Err(e),

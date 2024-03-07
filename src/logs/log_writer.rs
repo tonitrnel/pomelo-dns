@@ -48,7 +48,7 @@ impl LogWriter{
                     LogTask::Write(buf) => {
                         let file = match map.get_mut(&id) {
                             Some(r) => &mut r.1,
-                            None => continue
+                            None => continue,
                         };
                         if let Err(err) = file.write_all(&buf) {
                             eprintln!("Failed to write to log file: {}", err);
@@ -57,7 +57,7 @@ impl LogWriter{
                     LogTask::Flush => {
                         let file = match map.get_mut(&id) {
                             Some(r) => &mut r.1,
-                            None => continue
+                            None => continue,
                         };
                         if let Err(err) = file.flush() {
                             eprintln!("Failed to flush log file: {}", err);
@@ -74,7 +74,7 @@ impl LogWriter{
                             };
                         }
                     }
-                    LogTask::AddFile( path,file) => {
+                    LogTask::AddFile(path, file) => {
                         map.insert(id, (path, file));
                     }
                 }
@@ -116,9 +116,9 @@ impl<'a> MakeWriter<'a> for LogWriter {
     type Writer = Writer<'a>;
 
     fn make_writer(&'a self) -> Self::Writer {
-        Writer{
+        Writer {
             id: self.id,
-            sender: &self.sender
+            sender: &self.sender,
         }
     }
 }
