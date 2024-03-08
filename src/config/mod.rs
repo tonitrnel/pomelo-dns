@@ -125,7 +125,13 @@ impl Inner {
         self.servers.get(key).as_ref().unwrap()
     }
     pub fn get_hosts(&self, group: impl AsRef<str>, domain: &str) -> Vec<IpAddr> {
-        let domain = Name::from_str(domain).unwrap();
+        let domain = match Name::from_str(domain) {
+            Ok(domain) => domain,
+            Err(err) => {
+                tracing::error!("Failed parse '{}' to Name, {}", domain, err);
+                return vec![]
+            }
+        };
         let default = self.hosts.get(DEFAULT_GROUP).into_iter().flatten();
         let group = self.hosts.get(group.as_ref()).into_iter().flatten();
         group
@@ -298,13 +304,14 @@ impl Config {
         })
     }
     /// 重载配置
+    #[allow(unused)]
     pub fn reload(&self) -> anyhow::Result<()> {
         let (inner, _watch_paths) =
             Inner::load(&self.path).with_context(|| "Failed to load config file")?;
         let inner_ptr = Arc::into_raw(Arc::new(inner)) as *mut Inner;
         let old_ptr = self.ptr.swap(inner_ptr, Ordering::SeqCst);
         unsafe {
-            // 转为 Arc 再丢弃
+            // 转回 Arc 然后丢弃
             let _ = Arc::from_raw(old_ptr);
         };
         Ok(())
@@ -325,7 +332,6 @@ impl Config {
 
 impl Drop for Config {
     fn drop(&mut self) {
-        tracing::trace!("drop {:?}", self.ptr);
         unsafe {
             // 转为 Arc 再丢弃
             let _ = Arc::from_raw(self.ptr.load(Ordering::SeqCst));
