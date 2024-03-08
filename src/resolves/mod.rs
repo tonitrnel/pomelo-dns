@@ -1,10 +1,10 @@
-pub mod default;
+pub mod generic;
 pub mod doh;
 pub mod dot;
 mod http;
 
 use crate::resolves::doh::DoH;
-pub use default::Default;
+pub use generic::Generic;
 pub use dot::DoT;
 use std::borrow::Cow;
 
@@ -29,7 +29,7 @@ pub async fn resolve(server: &str, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
     } else {
         let (_, addr, port) = split_addr(server);
         let addr = format!("{}:{}", addr, port.unwrap_or("53"));
-        let mut dns = Default::new(&addr);
+        let mut dns = Generic::new(&addr);
         dns.resolve(bytes).await
     }
 }

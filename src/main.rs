@@ -39,19 +39,27 @@ async fn main() -> anyhow::Result<()> {
     let config =
         Arc::new(Config::new(PathBuf::from(path)).with_context(|| "Failed to load config file")?);
     let (mut log_writer, log_handle) = logs::LogWriter::new()?;
-    let (log_guard, udp, tcp) = {
+    let (udp, tcp) = {
         let config = config.access();
-        let guard = registry_logs(&mut log_writer, config.metadata.access_log)?;
+        registry_logs(&mut log_writer, config.metadata.access_log)?;
         let udp = UdpSocket::bind(&config.metadata.bind)
             .await
             .with_context(|| format!("could not bind to udp: {}", &config.metadata.bind))?;
         let tcp = TcpListener::bind(&config.metadata.bind)
             .await
             .with_context(|| format!("could not bind to tcp: {}", &config.metadata.bind))?;
-        (guard, udp, tcp)
+        (udp, tcp)
     };
     print_banner();
-    println!("started, version {}-{}", env!("CARGO_PKG_VERSION"), env!("COMMIT_HASH"));
+    tracing::info!(
+        "Pomelo {version} ({commit_id} {build_date}) built with docker{docker_version}, {system_version}, rustc{rustc_version}",
+        build_date = env!("BUILD_DATE"),
+        version = env!("CARGO_PKG_VERSION"),
+        commit_id = env!("COMMIT_ID"),
+        docker_version = env!("DOCKER_VERSION"),
+        rustc_version = env!("RUSTC_VERSION"),
+        system_version = env!("SYSTEM_VERSION"),
+    );
     tracing::info!("The DNS Server running: ");
     tracing::info!(
         "udp://{}",
@@ -67,21 +75,20 @@ async fn main() -> anyhow::Result<()> {
     match server::run_until_done(
         ServerArgs {
             config,
-            logs: log_writer,
+            logs: Arc::new(log_writer),
         },
         (tcp, udp),
     )
     .await
     {
         Ok(()) => {
-            println!("PomeloDNS stopping...");
+            println!("Pomelo stopping...");
         }
         Err(err) => {
-            eprintln!("PomeloDNS has encountered an error: {}", err);
+            eprintln!("Pomelo has encountered an error: {}", err);
             return Err(err);
         }
     }
-    drop(log_guard);
     match log_handle.await {
         Ok(result) => result?,
         Err(err) if err.is_panic() => {

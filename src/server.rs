@@ -139,7 +139,7 @@ impl TcpServer {
 
 pub struct ServerArgs {
     pub config: Arc<Config>,
-    pub logs: LogWriter,
+    pub logs: Arc<LogWriter>,
 }
 
 pub async fn run_until_done(
@@ -189,6 +189,7 @@ pub async fn run_until_done(
     #[cfg(target_os = "linux")]
     {
         let shutdown_signal = shutdown_signal.clone();
+        let logs = args.logs.clone();
         join_set.spawn(async move {
             let mut sighup = signal::unix::signal(signal::unix::SignalKind::hangup())?;
             let mut usr1 = signal::unix::signal(signal::unix::SignalKind::user_defined1())?;
@@ -196,17 +197,20 @@ pub async fn run_until_done(
             loop {
                 tokio::select! {
                     _ = sighup.recv() => {
+                        tracing::debug!("Received SIGNUP signal, start reloading config");
                             match args.config.reload() {
                                 Ok(_) => tracing::info!("Config reloaded successfully."),
                                 Err(err) => tracing::error!("Failed to reload config: {err:?}")
                             }
                     }
                     _ = sigterm.recv() => {
+                        tracing::debug!("Received SIGTERM signal, start terminating");
                         shutdown_signal.cancel();
                     }
                     _ = usr1.recv() => {
-                        match args.logs.reopen(){
-                            Ok(_) => (),
+                        tracing::debug!("Received USR1 signal, start reopening log files");
+                        match logs.reopen(){
+                            Ok(_) => tracing::info!("Log files reopen successful."),
                             Err(err) => eprintln!("Failed to reopen log files: {err:?}")
                         }
                     }
@@ -218,6 +222,7 @@ pub async fn run_until_done(
     while let Some(r) = join_set.join_next().await {
         if shutdown_signal.is_cancelled() {
             join_set.shutdown().await;
+            args.logs.terminal();
             break;
         }
         match r {

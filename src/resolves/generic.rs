@@ -1,21 +1,25 @@
 use crate::resolves::DNSResolver;
 use tokio::net::UdpSocket;
 
-pub struct Default<'input> {
+pub struct Generic<'input> {
     target: &'input str,
+    udp_payload_size: usize,
 }
 
-impl<'input> Default<'input> {
+impl<'input> Generic<'input> {
     pub fn new(target: &'input str) -> Self {
-        Default { target }
+        Generic { target, udp_payload_size: 4096 }
+    }
+    pub fn set_udp_payload_size(&mut self, udp_payload_size: usize){
+        self.udp_payload_size = udp_payload_size;
     }
 }
 
-impl<'input> DNSResolver for Default<'input> {
+impl<'input> DNSResolver for Generic<'input> {
     async fn resolve(&mut self, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
         let socket = UdpSocket::bind("0.0.0.0:0").await?;
         socket.send_to(bytes, self.target).await?;
-        let mut response = vec![0; 4096];
+        let mut response = vec![0; self.udp_payload_size];
         let (len, _) = socket.recv_from(&mut response).await?;
         response.truncate(len);
         Ok(response)
@@ -31,7 +35,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_works() {
-        let mut dns = Default::new("1.1.1.1:53");
+        let mut dns = Generic::new("1.1.1.1:53");
         // query example.com
         let bytes = [
             0x00, 0x02, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x65,

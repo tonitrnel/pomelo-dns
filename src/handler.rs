@@ -65,7 +65,10 @@ impl Handler {
             id = req.id(),
             group = self.group,
         );
-        tracing::trace!("[->](Q) Queries: {}", format_queries(req.queries()));
+        tracing::trace!(
+            "[->](Q) Queries: {}",
+            format_queries(req.queries(), req.extensions().is_some())
+        );
         if let Some(res) = Self::print_err_and_flatten(
             self.resolve_from_hosts(&req)
                 .await
@@ -112,6 +115,7 @@ impl Handler {
         }
         self.cache_dns_record(&res)
             .with_context(|| "Failed to cache DNS record")?;
+        res.set_authentic_data(false);
         self.print_dns_query_detail('F', &req, &res);
         send_ret(
             res.to_vec()
@@ -359,15 +363,16 @@ pub(crate) fn format_err(err: anyhow::Error, indent: usize) -> String {
     )
 }
 
-fn format_queries(queries: &[Query]) -> String {
+fn format_queries(queries: &[Query], edns: bool) -> String {
     queries
         .iter()
         .map(|it| {
             format!(
-                "{}: type {}, class {}",
+                "{}: type {}, class {}{}",
                 it.name(),
                 it.query_type(),
-                it.query_class()
+                it.query_class(),
+                if edns { ", OPT" } else { "" }
             )
         })
         .collect::<Vec<_>>()

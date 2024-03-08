@@ -6,46 +6,46 @@ use std::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing_subscriber::fmt::MakeWriter;
 
-
 enum LogTask {
-    Write(Vec<u8>),
-    Flush,
+    Write(usize, Vec<u8>),
+    Flush(usize),
     Reopen,
-    AddFile(PathBuf, File),
+    AddFile(usize, PathBuf, File),
+    Terminal,
 }
 pub struct Writer<'a> {
     id: usize,
-    sender: &'a mpsc::Sender<(usize, LogTask)>,
+    sender: &'a mpsc::Sender<LogTask>,
 }
 impl Write for Writer<'_> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.sender
-            .send((self.id, LogTask::Write(buf.to_vec())))
+            .send(LogTask::Write(self.id, buf.to_vec()))
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to send log task"))?;
         Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         self.sender
-            .send((self.id, LogTask::Flush))
+            .send(LogTask::Flush(self.id))
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to send flush task"))?;
         Ok(())
     }
 }
 
-pub struct LogWriter{
+pub struct LogWriter {
     id: usize,
-    sender: mpsc::Sender<(usize, LogTask)>,
+    sender: mpsc::Sender<LogTask>,
 }
 
-impl LogWriter{
+impl LogWriter {
     pub fn new() -> anyhow::Result<(Self, JoinHandle<anyhow::Result<()>>)> {
-        let (sender, tasks) = mpsc::channel::<(usize, LogTask)>();
+        let (sender, tasks) = mpsc::channel::<LogTask>();
         let handle = tokio::spawn(async move {
             let mut map: HashMap<usize, (PathBuf, File)> = HashMap::new();
-            for (id, task) in tasks {
+            for task in tasks {
                 match task {
-                    LogTask::Write(buf) => {
+                    LogTask::Write(id, buf) => {
                         let file = match map.get_mut(&id) {
                             Some(r) => &mut r.1,
                             None => continue,
@@ -54,7 +54,7 @@ impl LogWriter{
                             eprintln!("Failed to write to log file: {}", err);
                         }
                     }
-                    LogTask::Flush => {
+                    LogTask::Flush(id) => {
                         let file = match map.get_mut(&id) {
                             Some(r) => &mut r.1,
                             None => continue,
@@ -74,9 +74,11 @@ impl LogWriter{
                             };
                         }
                     }
-                    LogTask::AddFile(path, file) => {
+                    LogTask::AddFile(id, path, file) => {
                         map.insert(id, (path, file));
                     }
+                    // 似乎不合适
+                    LogTask::Terminal => break,
                 }
             }
             Ok(()) as anyhow::Result<()>
@@ -91,12 +93,12 @@ impl LogWriter{
             .open(path)
             .with_context(|| format!("Failed to open log file '{path:?}'"))
     }
-    pub fn create(&self, path: impl AsRef<Path>) -> anyhow::Result<Self> {
+    pub fn create_file_writer(&self, path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let file = Self::open(&path)?;
         let id = self.id + 1;
         self.sender
-            .send((id, LogTask::AddFile(path, file)))
+            .send(LogTask::AddFile(id, path, file))
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to send log task"))?;
         Ok(Self {
             id,
@@ -106,9 +108,12 @@ impl LogWriter{
     /// 用于轮转日志，将会重新打开日志文件
     pub fn reopen(&self) -> anyhow::Result<()> {
         self.sender
-            .send((0, LogTask::Reopen))
+            .send(LogTask::Reopen)
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to send log task"))?;
         Ok(())
+    }
+    pub fn terminal(&self) {
+        let _ = self.sender.send(LogTask::Terminal);
     }
 }
 
