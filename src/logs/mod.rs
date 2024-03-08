@@ -1,7 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::path::Path;
-use tracing::subscriber::DefaultGuard;
 use tracing::Level;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{
     fmt::time::ChronoLocal,
     layer::SubscriberExt,
@@ -22,7 +22,10 @@ fn log_file(path: &Path) -> anyhow::Result<File> {
         .open(path)
         .with_context(|| format!("Failed to open log file '{path:?}'"))
 }
-pub fn registry_logs(writer: &mut LogWriter, access_log: bool) -> anyhow::Result<DefaultGuard> {
+pub fn registry_logs(
+    #[allow(unused_variables)] writer: &mut LogWriter, // current only been use on linux.
+    access_log: bool,
+) -> anyhow::Result<()> {
     let mut layers = Vec::new();
     let targets = filter::Targets::new().with_target("pomelo", Level::TRACE);
     let generic_layer = tracing_subscriber::fmt::layer()
@@ -35,10 +38,11 @@ pub fn registry_logs(writer: &mut LogWriter, access_log: bool) -> anyhow::Result
     layers.push(generic_layer.boxed());
     #[cfg(target_os = "linux")]
     {
-        let file = writer.create(Path::new("/var/log/pomelo/error.log"))?;
+        let file = writer.create_file_writer(Path::new("/var/log/pomelo/error.log"))?;
         let error_layer = tracing_subscriber::fmt::layer()
             .with_level(false)
-            .with_target(true)
+            .with_file(true)
+            .with_line_number(true)
             .with_ansi(false)
             .compact()
             .with_timer(ChronoLocal::new("%F %X%.3f".to_string()))
@@ -58,9 +62,11 @@ pub fn registry_logs(writer: &mut LogWriter, access_log: bool) -> anyhow::Result
         layers.push(sequential_layer.boxed());
         #[cfg(target_os = "linux")]
         {
-            let file = writer.create(Path::new("/var/log/pomelo/access.log"))?;
+            let file = writer.create_file_writer(Path::new("/var/log/pomelo/access.log"))?;
             let access_layer = seq_layer::layer()
                 .with_ansi(false)
+                .with_file(true)
+                .with_line_number(true)
                 .with_writer(file)
                 .with_filter(filter::filter_fn(|metadata| {
                     metadata.target() == "pomelo::handler" || metadata.target() == "sequential"
@@ -68,7 +74,9 @@ pub fn registry_logs(writer: &mut LogWriter, access_log: bool) -> anyhow::Result
             layers.push(access_layer.boxed())
         }
     }
-    let subscriber = tracing_subscriber::registry().with(targets).with(layers);
-    let guard = tracing::subscriber::set_default(subscriber);
-    Ok(guard)
+    tracing_subscriber::registry()
+        .with(targets)
+        .with(layers)
+        .init();
+    Ok(())
 }
