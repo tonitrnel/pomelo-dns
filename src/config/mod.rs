@@ -124,23 +124,17 @@ impl Inner {
         };
         self.servers.get(key).as_ref().unwrap()
     }
-    pub fn get_hosts(&self, group: impl AsRef<str>, domain: &str) -> Vec<IpAddr> {
-        let domain = match Name::from_str(domain) {
-            Ok(domain) => domain,
-            Err(err) => {
-                tracing::error!("Failed parse '{}' to Name, {}", domain, err);
-                return vec![]
-            }
-        };
+    pub fn get_hosts(&self, group: impl AsRef<str>, domain: &str) -> anyhow::Result<Vec<IpAddr>> {
+        let domain = Name::from_str(domain).with_context(||format!("Failed parse '{}' to Name", domain))?;
         let default = self.hosts.get(DEFAULT_GROUP).into_iter().flatten();
         let group = self.hosts.get(group.as_ref()).into_iter().flatten();
-        group
+        Ok(group
             .chain(default)
             .find_map(|it| if it.1 == domain { Some(it.0) } else { None })
             // .filter_map(|it| if it.1 == domain { Some(it.0) } else { None })
             // .collect::<HashSet<_>>()
             .into_iter()
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>())
     }
     pub fn get_hostname(&self, group: impl AsRef<str>, addr: IpAddr) -> Option<String> {
         let default = self.hosts.get(DEFAULT_GROUP).into_iter().flatten();

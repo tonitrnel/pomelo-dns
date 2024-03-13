@@ -62,12 +62,14 @@ pub fn registry_logs(
         layers.push(sequential_layer.boxed());
         #[cfg(target_os = "linux")]
         {
-            let file = writer.create_file_writer(Path::new("/var/log/pomelo/access.log"))?;
+            let access_file = writer.create_file_writer(Path::new("/var/log/pomelo/access.log"))?;
+            let error_file = writer.create_file_writer(Path::new("/var/log/pomelo/error.log"))?;
             let access_layer = seq_layer::layer()
                 .with_ansi(false)
                 .with_file(true)
                 .with_line_number(true)
-                .with_writer(file)
+                .with_scope(false)
+                .with_writers((access_file, error_file))
                 .with_filter(filter::filter_fn(|metadata| {
                     metadata.target() == "pomelo::handler" || metadata.target() == "sequential"
                 }));

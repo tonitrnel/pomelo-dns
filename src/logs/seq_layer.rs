@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::sync::{Arc, Mutex};
 
 use nu_ansi_term::{Color, Style};
-use tracing::{field::Field, span::Attributes, Event, Id, Level, Subscriber, Metadata};
+use tracing::{field::Field, span::Attributes, Event, Id, Level, Metadata, Subscriber};
 use tracing_subscriber::{
     field::Visit,
     fmt::MakeWriter,
@@ -26,12 +26,14 @@ struct FormatterArgs {
     display_filename: bool,
     display_line_number: bool,
     display_level: bool,
+    display_scope: bool
 }
-
-pub struct SequentialLogLayer<S, W = fn() -> io::Stdout> {
+type LogPools = HashMap<Id, (Vec<String>, bool)>;
+pub struct SequentialLogLayer<S, W1 = fn() -> io::Stdout, W2 = fn() -> io::Stderr> {
     fmt_args: FormatterArgs,
-    logs: Arc<Mutex<HashMap<Id, Vec<String>>>>,
-    make_writer: W,
+    logs: Arc<Mutex<LogPools>>,
+    make_access_writer: W1,
+    make_error_writer: W2,
     _inner: PhantomData<fn(S)>,
 }
 
@@ -70,7 +72,9 @@ where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
     fn format_level(&self, f: &mut Formatter<'_>, level: &Level) -> fmt::Result {
-        if !self.fmt_args.display_level { return Ok(())  }
+        if !self.fmt_args.display_level {
+            return Ok(());
+        }
         if self.fmt_args.ansi {
             let str = format!("{:>5}", level);
             match *level {
@@ -95,6 +99,7 @@ where
         f.write_char(' ')
     }
     fn format_scope(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        if !self.fmt_args.display_scope { return Ok(()) }
         let bold = self.bold();
         let mut seen = false;
         let span = self
@@ -119,25 +124,35 @@ where
         self.event.record(&mut visitor);
         write!(f, "{} ", visitor)
     }
-    fn format_target(&self, f: &mut Formatter<'_>, meta: &Metadata, dimmed: &Style) -> fmt::Result{
-        if !self.fmt_args.display_target { return Ok(()) }
+    fn format_target(&self, f: &mut Formatter<'_>, meta: &Metadata, dimmed: &Style) -> fmt::Result {
+        if !self.fmt_args.display_target {
+            return Ok(());
+        }
         write!(f, "{}{} ", dimmed.paint(meta.target()), dimmed.paint(":"))
     }
-    fn format_file(&self,f: &mut Formatter<'_>, meta: &Metadata, dimmed: &Style) -> fmt::Result{
-        if !self.fmt_args.display_filename { return Ok(()) }
-        let line_number = if self.fmt_args.display_line_number{
+    fn format_file(&self, f: &mut Formatter<'_>, meta: &Metadata, dimmed: &Style) -> fmt::Result {
+        if !self.fmt_args.display_filename {
+            return Ok(());
+        }
+        let line_number = if self.fmt_args.display_line_number {
             meta.line()
-        } else { 
+        } else {
             None
         };
         let filename = if let Some(filename) = meta.file() {
             filename
-        } else { 
-            return Ok(())
+        } else {
+            return Ok(());
         };
-        write!(f, "{}{}{}", dimmed.paint(filename), dimmed.paint(":"), if line_number.is_some() {""} else {" "})?;
-        if let Some(line_number) = line_number{
-            write!(f, "{}{}:{} ",dimmed.prefix(),line_number,dimmed.suffix())?;
+        write!(
+            f,
+            "{}{}{}",
+            dimmed.paint(filename),
+            dimmed.paint(":"),
+            if line_number.is_some() { "" } else { " " }
+        )?;
+        if let Some(line_number) = line_number {
+            write!(f, "{}{}:{} ", dimmed.prefix(), line_number, dimmed.suffix())?;
         }
         Ok(())
     }
@@ -163,22 +178,22 @@ where
 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let meta = self.event.metadata();
-        
+
         self.format_timestamp(f)?;
-        
+
         let level = meta.level();
         self.format_level(f, level)?;
-        
+
         let dimmed = self.dimmed();
-        
+
         if *level != Level::ERROR {
             self.format_scope(f)?;
         }
-        
+
         self.format_target(f, meta, &dimmed)?;
-        
+
         self.format_file(f, meta, &dimmed)?;
-        
+
         self.format_fields(f)?;
         writeln!(f)
     }
@@ -195,9 +210,11 @@ impl<S> SequentialLogLayer<S> {
                 display_target: false,
                 display_filename: false,
                 display_line_number: false,
+                display_scope: true,
             },
             logs: Arc::new(Mutex::new(HashMap::new())),
-            make_writer: io::stdout,
+            make_access_writer: io::stdout,
+            make_error_writer: io::stderr,
             _inner: PhantomData,
         }
     }
@@ -215,7 +232,7 @@ impl<S> SequentialLogLayer<S> {
     #[allow(unused)]
     pub fn with_target(self, display_target: bool) -> Self {
         Self {
-            fmt_args: FormatterArgs{
+            fmt_args: FormatterArgs {
                 display_target,
                 ..self.fmt_args
             },
@@ -225,8 +242,18 @@ impl<S> SequentialLogLayer<S> {
     #[allow(unused)]
     pub fn with_file(self, display_filename: bool) -> Self {
         Self {
-            fmt_args: FormatterArgs{
+            fmt_args: FormatterArgs {
                 display_filename,
+                ..self.fmt_args
+            },
+            ..self
+        }
+    }
+    #[allow(unused)]
+    pub fn with_scope(self, display_scope: bool) -> Self {
+        Self {
+            fmt_args: FormatterArgs {
+                display_scope,
                 ..self.fmt_args
             },
             ..self
@@ -235,45 +262,62 @@ impl<S> SequentialLogLayer<S> {
     #[allow(unused)]
     pub fn with_line_number(self, display_line_number: bool) -> Self {
         Self {
-            fmt_args: FormatterArgs{
+            fmt_args: FormatterArgs {
                 display_line_number,
                 ..self.fmt_args
             },
             ..self
         }
     }
+    fn write_messages<W: io::Write>(writer: &mut W, messages: Vec<String>) -> io::Result<()>{
+        for mut message in messages {
+            if !message.ends_with('\n') {
+                message.push('\n');
+            }
+            writer.write_all(message.as_bytes())?;
+        }
+        writer.flush()
+    }
 }
-impl<S, W> SequentialLogLayer<S, W>
+impl<S, AW, EW> SequentialLogLayer<S, AW, EW>
 where
-    W: for<'writer> MakeWriter<'writer> + 'static,
+    AW: for<'writer> MakeWriter<'writer> + 'static,
+    EW: for<'writer> MakeWriter<'writer> + 'static,
 {
     #[allow(unused)]
-    pub fn with_writer<W2>(self, make_writer: W2) -> SequentialLogLayer<S, W2>
+    pub fn with_writers<W2, W3>(self, make_writers: (W2, W3)) -> SequentialLogLayer<S, W2, W3>
     where
         W2: for<'writer> MakeWriter<'writer> + 'static,
+        W3: for<'writer> MakeWriter<'writer> + 'static,
     {
         SequentialLogLayer {
             fmt_args: self.fmt_args,
             _inner: self._inner,
             logs: self.logs,
-            make_writer,
+            make_access_writer: make_writers.0,
+            make_error_writer: make_writers.1,
         }
     }
 }
 
-impl<S, W> Layer<S> for SequentialLogLayer<S, W>
+impl<S, W1, W2> Layer<S> for SequentialLogLayer<S, W1, W2>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
-    W: for<'writer> MakeWriter<'writer> + 'static,
+    W1: for<'writer> MakeWriter<'writer> + 'static,
+    W2: for<'writer> MakeWriter<'writer> + 'static,
 {
     fn on_new_span(&self, _attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
         let mut logs = self.logs.lock().unwrap();
-        logs.entry(id.clone()).or_default();
+        logs.entry(id.clone()).or_insert_with(||(Vec::new(), false));
     }
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         if let Some(span_id) = ctx.current_span().id() {
             let mut logs = self.logs.lock().unwrap();
-            if let Some(pool) = logs.get_mut(span_id) {
+            let level = event.metadata().level();
+            if let Some((pool, is_error)) = logs.get_mut(span_id) {
+                if *level == Level::ERROR {
+                    *is_error = true;
+                }
                 let formatter = SequentialLogLayerFormatter {
                     fmt_args: self.fmt_args,
                     event,
@@ -285,14 +329,14 @@ where
     }
     fn on_close(&self, id: Id, _ctx: Context<'_, S>) {
         let mut logs = self.logs.lock().unwrap();
-        if let Some(messages) = logs.remove(&id) {
-            let mut writer = self.make_writer.make_writer();
-            for mut message in messages {
-                if !message.ends_with('\n') {
-                    message.push('\n')
-                }
-                io::Write::write_all(&mut writer, message.as_bytes()).unwrap()
-            }
+        if let Some((messages, is_error)) = logs.remove(&id) {
+            if is_error {
+                let mut writer = self.make_error_writer.make_writer();
+                let _ = SequentialLogLayer::<S>::write_messages(&mut writer, messages);
+            } else {
+                let mut writer = self.make_access_writer.make_writer();
+                let _ = SequentialLogLayer::<S>::write_messages(&mut writer, messages);
+            };
         }
     }
 }

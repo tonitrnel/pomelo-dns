@@ -32,10 +32,26 @@ impl Write for Writer<'_> {
         Ok(())
     }
 }
-
-pub struct LogWriter {
+pub struct FileWriter{
     id: usize,
     sender: mpsc::Sender<LogTask>,
+}
+impl<'a> MakeWriter<'a> for FileWriter {
+    type Writer = Writer<'a>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        Writer {
+            id: self.id,
+            sender: &self.sender,
+        }
+    }
+}
+
+
+pub struct LogWriter {
+    id_acc: usize,
+    sender: mpsc::Sender<LogTask>,
+    handles: HashMap<PathBuf, File>
 }
 
 impl LogWriter {
@@ -83,7 +99,7 @@ impl LogWriter {
             }
             Ok(()) as anyhow::Result<()>
         });
-        Ok((Self { id: 0, sender }, handle))
+        Ok((Self { id_acc: 0, sender, handles: HashMap::new() }, handle))
     }
     fn open(path: &Path) -> anyhow::Result<File> {
         use anyhow::Context;
@@ -93,15 +109,22 @@ impl LogWriter {
             .open(path)
             .with_context(|| format!("Failed to open log file '{path:?}'"))
     }
-    pub fn create_file_writer(&self, path: impl AsRef<Path>) -> anyhow::Result<Self> {
+    #[allow(unused)]
+    pub fn create_file_writer(&mut self, path: impl AsRef<Path>) -> anyhow::Result<FileWriter> {
         let path = path.as_ref().to_path_buf();
-        let file = Self::open(&path)?;
-        let id = self.id + 1;
+        let file = if self.handles.contains_key(&path) {
+            self.handles.get(&path)
+        } else {
+            let file = Self::open(&path)?;
+            self.handles.insert(path.to_owned(), file);
+            self.handles.get(&path)
+        }.unwrap().try_clone()?;
+        self.id_acc += 1;
         self.sender
-            .send(LogTask::AddFile(id, path, file))
+            .send(LogTask::AddFile(self.id_acc, path, file))
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to send log task"))?;
-        Ok(Self {
-            id,
+        Ok(FileWriter {
+            id: self.id_acc,
             sender: self.sender.clone(),
         })
     }
@@ -114,16 +137,5 @@ impl LogWriter {
     }
     pub fn terminal(&self) {
         let _ = self.sender.send(LogTask::Terminal);
-    }
-}
-
-impl<'a> MakeWriter<'a> for LogWriter {
-    type Writer = Writer<'a>;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        Writer {
-            id: self.id,
-            sender: &self.sender,
-        }
     }
 }
