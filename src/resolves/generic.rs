@@ -1,4 +1,4 @@
-use crate::resolves::DNSResolver;
+use crate::resolves::{DNSResolver, ResolveOpts};
 use tokio::net::UdpSocket;
 
 pub struct Generic<'input> {
@@ -7,11 +7,8 @@ pub struct Generic<'input> {
 }
 
 impl<'input> Generic<'input> {
-    pub fn new(target: &'input str) -> Self {
-        Generic { target, udp_payload_size: 4096 }
-    }
-    pub fn set_udp_payload_size(&mut self, udp_payload_size: usize){
-        self.udp_payload_size = udp_payload_size;
+    pub fn new(target: &'input str, opts: ResolveOpts) -> Self {
+        Generic { target, udp_payload_size: opts.max_payload_size }
     }
 }
 
@@ -35,7 +32,7 @@ mod tests {
 
     #[tokio::test]
     async fn it_works() {
-        let mut dns = Generic::new("1.1.1.1:53");
+        let mut dns = Generic::new("1.1.1.1:53", ResolveOpts{max_payload_size: 4096});
         // query example.com
         let bytes = [
             0x00, 0x02, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, 0x65,

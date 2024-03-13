@@ -12,7 +12,11 @@ pub trait DNSResolver {
     async fn resolve(&mut self, bytes: &[u8]) -> anyhow::Result<Vec<u8>>;
 }
 
-pub async fn resolve(server: &str, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+pub struct ResolveOpts{
+    pub max_payload_size: usize
+}
+
+pub async fn resolve(server: &str, bytes: &[u8], opts: ResolveOpts) -> anyhow::Result<Vec<u8>> {
     if server.starts_with("tls://") {
         let (_, addr, port) = split_addr(server);
         let addr = format!("{}:{}", addr, port.unwrap_or("853"));
@@ -29,7 +33,7 @@ pub async fn resolve(server: &str, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
     } else {
         let (_, addr, port) = split_addr(server);
         let addr = format!("{}:{}", addr, port.unwrap_or("53"));
-        let mut dns = Generic::new(&addr);
+        let mut dns = Generic::new(&addr, opts);
         dns.resolve(bytes).await
     }
 }

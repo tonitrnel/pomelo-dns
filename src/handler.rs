@@ -1,6 +1,6 @@
 use crate::cache::Cache;
 use crate::config::Config;
-use crate::resolves::resolve;
+use crate::resolves::{resolve, ResolveOpts};
 use anyhow::Context;
 use hickory_proto::op::{Message, MessageType, Query};
 use hickory_proto::rr::{rdata, Name, RData, Record, RecordType};
@@ -99,7 +99,7 @@ impl Handler {
             return Ok(());
         }
         let res = self
-            .forward_dns_query(&bytes)
+            .forward_dns_query(&req,&bytes)
             .await
             .with_context(|| "Failed to forward DNS query")?;
         let mut res = Message::from_bytes(&res)
@@ -134,15 +134,13 @@ impl Handler {
             let name = query.name().to_utf8();
             match query.query_type() {
                 RecordType::PTR => {
-                    if let Err(err) = self.local_reverse_dns_query(&name, query, &mut answers) {
-                        tracing::warn!("{}", format_err(err, 41))
-                    };
+                    self.local_reverse_dns_query(&name, query, &mut answers)?;
                 }
                 RecordType::A => {
                     let addrs = self
                         .config
                         .access()
-                        .get_hosts(&self.group, &name)
+                        .get_hosts(&self.group, &name)?
                         .into_iter()
                         .filter_map(|it| match it {
                             IpAddr::V4(addr) => Some(addr),
@@ -166,7 +164,7 @@ impl Handler {
                     let addrs = self
                         .config
                         .access()
-                        .get_hosts(&self.group, &name)
+                        .get_hosts(&self.group, &name)?
                         .into_iter()
                         .filter_map(|it| match it {
                             IpAddr::V6(addr) => Some(addr),
@@ -276,12 +274,18 @@ impl Handler {
             ))
         }
     }
-    async fn forward_dns_query(&mut self, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    async fn forward_dns_query(&mut self, req: &Message, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
         let config = self.config.access();
         let server = config.get_server(&self.group);
         let now = Instant::now();
+        let mut opts = ResolveOpts{
+            max_payload_size: 4096
+        };
+        if let Some(ext) = req.extensions(){
+            opts.max_payload_size = ext.max_payload() as usize
+        }
         tokio::select! {
-            res = resolve(&server[0], bytes) =>  {
+            res = resolve(&server[0], bytes, opts) =>  {
                 Ok(res?)
             },
             _ = tokio::time::sleep(self.timeout) => {
