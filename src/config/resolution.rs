@@ -50,9 +50,30 @@ impl Resolution {
     pub fn payload_match(&self, domain: &Name) -> bool {
         match &self.payload {
             ResolutionPayload::All => true,
-            ResolutionPayload::Domain(it) => Name::from_ascii(it)
-                .map(|it| it.eq_case(domain))
-                .unwrap_or(false),
+            ResolutionPayload::Domain(it) => {
+                let mut is_special_wildcard = false;
+                if it.starts_with('.') {
+                    is_special_wildcard = true;
+                    let trimmed_str = it.trim_start_matches('.');
+                    Name::from_ascii(trimmed_str)
+                } else {
+                    Name::from_ascii(it)
+                }
+                .map(|it| {
+                    if is_special_wildcard {
+                        return it.zone_of_case(domain);
+                    }
+                    if it.is_wildcard() {
+                        let basename = it.base_name();
+                        return basename.zone_of_case(domain) && &basename != domain;
+                    }
+                    it.eq_case(domain)
+                })
+                .unwrap_or_else(|err| {
+                    println!("parse failed, reason: {err:?}");
+                    false
+                })
+            }
         }
     }
     pub async fn ping_cache<'a>() -> &'a Arc<Mutex<LruCache<IpAddr, bool>>> {
@@ -161,4 +182,28 @@ pub fn ipv6_resolution_parse(row: usize, line: &str, inner: &mut Inner) -> anyho
             .collect::<Result<Vec<Resolution>, anyhow::Error>>()?,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn case_1() {
+        let resolution = Resolution {
+            directive: ResolutionDirective::Allow,
+            payload: ResolutionPayload::from_str(".example.com").unwrap(),
+        };
+        assert!(resolution.payload_match(&Name::from_str("example.com").unwrap()));
+        assert!(resolution.payload_match(&Name::from_str("abc.example.com").unwrap()));
+        assert!(resolution.payload_match(&Name::from_str("www.abc.example.com").unwrap()));
+
+        let resolution = Resolution {
+            directive: ResolutionDirective::Allow,
+            payload: ResolutionPayload::from_str("*.example.com").unwrap(),
+        };
+        assert!(!resolution.payload_match(&Name::from_str("example.com").unwrap()));
+        assert!(resolution.payload_match(&Name::from_str("abc.example.com").unwrap()));
+        assert!(resolution.payload_match(&Name::from_str("www.abc.example.com").unwrap()));
+    }
 }
